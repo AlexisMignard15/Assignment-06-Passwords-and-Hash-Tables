@@ -1,0 +1,618 @@
+#include <iostream>
+#include <iomanip>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <optional>
+#include <cstdint>
+#include <utility>
+
+using namespace std;
+
+uint64_t demoHash(const string& s) {
+    uint64_t h = 1469598103934665603ULL;
+
+    for (unsigned char c : s) {
+        h = (h ^ c) * 1099511628211ULL;
+    }
+
+    return h;
+}
+
+string toHex(uint64_t value) {
+    stringstream output;
+    output << hex << setw(16) << setfill('0') << value;
+    return output.str();
+}
+
+bool isPrime(size_t n) {
+    if (n < 2) return false;
+    if (n == 2) return true;
+    if (n % 2 == 0) return false;
+
+    for (size_t divisor = 3; divisor * divisor <= n; divisor += 2) {
+        if (n % divisor == 0) return false;
+    }
+
+    return true;
+}
+
+size_t nextPrime(size_t n) {
+    while (!isPrime(n)) {
+        ++n;
+    }
+
+    return n;
+}
+
+enum class CollisionStrategy {
+    Chaining,
+    LinearProbing,
+    QuadraticProbing,
+    DoubleHashing
+};
+
+string strategyName(CollisionStrategy strategy) {
+    switch (strategy) {
+        case CollisionStrategy::Chaining:
+            return "Separate chaining";
+
+        case CollisionStrategy::LinearProbing:
+            return "Linear probing";
+
+        case CollisionStrategy::QuadraticProbing:
+            return "Quadratic probing";
+
+        case CollisionStrategy::DoubleHashing:
+            return "Double hashing";
+    }
+
+    return "Unknown";
+}
+
+struct UserRecord {
+    string username;
+    string salt;
+    string passwordHash;
+};
+
+template <typename T>
+class HashTable {
+private:
+    enum class SlotState {
+        Empty,
+        Occupied,
+        Deleted
+    };
+
+    struct Slot {
+        SlotState state = SlotState::Empty;
+        string key;
+        T value;
+    };
+
+    CollisionStrategy strategy;
+
+    vector<vector<pair<string, T>>> chains;
+    vector<Slot> slots;
+
+    size_t itemCount = 0;
+    size_t collisionCount = 0;
+    double maxLoadFactor = 0.70;
+
+    size_t indexFor(const string& key, size_t tableCapacity) const {
+        return static_cast<size_t>(
+            demoHash(key) % tableCapacity
+        );
+    }
+
+    size_t secondHash(
+        const string& key,
+        size_t tableCapacity
+    ) const {
+        return 1 + static_cast<size_t>(
+            demoHash("step:" + key) % (tableCapacity - 1)
+        );
+    }
+
+    size_t probeIndex(
+        const string& key,
+        size_t attempt,
+        size_t tableCapacity
+    ) const {
+        size_t firstIndex = indexFor(key, tableCapacity);
+
+        switch (strategy) {
+            case CollisionStrategy::LinearProbing:
+                return (firstIndex + attempt) % tableCapacity;
+
+            case CollisionStrategy::QuadraticProbing:
+                return (firstIndex + attempt * attempt)
+                       % tableCapacity;
+
+            case CollisionStrategy::DoubleHashing:
+                return (
+                    firstIndex +
+                    attempt * secondHash(key, tableCapacity)
+                ) % tableCapacity;
+
+            case CollisionStrategy::Chaining:
+                return firstIndex;
+        }
+
+        return firstIndex;
+    }
+
+    void initialize(size_t requestedCapacity) {
+        size_t tableCapacity = nextPrime(requestedCapacity);
+
+        if (strategy == CollisionStrategy::Chaining) {
+            chains.clear();
+            chains.resize(tableCapacity);
+        } else {
+            slots.clear();
+            slots.resize(tableCapacity);
+        }
+    }
+
+    size_t capacity() const {
+        if (strategy == CollisionStrategy::Chaining) {
+            return chains.size();
+        }
+
+        return slots.size();
+    }
+
+    void rehash(size_t newCapacity) {
+        vector<pair<string, T>> entries;
+
+        if (strategy == CollisionStrategy::Chaining) {
+            for (const auto& bucket : chains) {
+                for (const auto& entry : bucket) {
+                    entries.push_back(entry);
+                }
+            }
+        } else {
+            for (const auto& slot : slots) {
+                if (slot.state == SlotState::Occupied) {
+                    entries.emplace_back(slot.key, slot.value);
+                }
+            }
+        }
+
+        initialize(newCapacity);
+        itemCount = 0;
+
+        for (const auto& entry : entries) {
+            insertWithoutResize(entry.first, entry.second);
+        }
+    }
+
+    void insertWithoutResize(
+        const string& key,
+        const T& value
+    ) {
+        if (strategy == CollisionStrategy::Chaining) {
+            size_t index = indexFor(key, chains.size());
+            auto& bucket = chains[index];
+
+            for (auto& entry : bucket) {
+                if (entry.first == key) {
+                    entry.second = value;
+                    return;
+                }
+            }
+
+            if (!bucket.empty()) {
+                ++collisionCount;
+            }
+
+            bucket.emplace_back(key, value);
+            ++itemCount;
+            return;
+        }
+
+        size_t firstDeleted = slots.size();
+
+        for (
+            size_t attempt = 0;
+            attempt < slots.size();
+            ++attempt
+        ) {
+            size_t index = probeIndex(
+                key,
+                attempt,
+                slots.size()
+            );
+
+            Slot& slot = slots[index];
+
+            if (
+                slot.state == SlotState::Occupied &&
+                slot.key == key
+            ) {
+                slot.value = value;
+                return;
+            }
+
+            if (
+                slot.state == SlotState::Deleted &&
+                firstDeleted == slots.size()
+            ) {
+                firstDeleted = index;
+            }
+
+            if (slot.state == SlotState::Empty) {
+                size_t target =
+                    firstDeleted == slots.size()
+                    ? index
+                    : firstDeleted;
+
+                if (attempt > 0 || target != index) {
+                    ++collisionCount;
+                }
+
+                slots[target].state = SlotState::Occupied;
+                slots[target].key = key;
+                slots[target].value = value;
+                ++itemCount;
+
+                return;
+            }
+        }
+
+        if (firstDeleted != slots.size()) {
+            slots[firstDeleted].state = SlotState::Occupied;
+            slots[firstDeleted].key = key;
+            slots[firstDeleted].value = value;
+            ++itemCount;
+
+            return;
+        }
+
+        rehash(slots.size() * 2 + 1);
+        insertWithoutResize(key, value);
+    }
+
+    optional<T> findInternal(const string& key) const {
+        if (strategy == CollisionStrategy::Chaining) {
+            size_t index = indexFor(key, chains.size());
+
+            for (const auto& entry : chains[index]) {
+                if (entry.first == key) {
+                    return entry.second;
+                }
+            }
+
+            return nullopt;
+        }
+
+        for (
+            size_t attempt = 0;
+            attempt < slots.size();
+            ++attempt
+        ) {
+            size_t index = probeIndex(
+                key,
+                attempt,
+                slots.size()
+            );
+
+            const Slot& slot = slots[index];
+
+            if (slot.state == SlotState::Empty) {
+                return nullopt;
+            }
+
+            if (
+                slot.state == SlotState::Occupied &&
+                slot.key == key
+            ) {
+                return slot.value;
+            }
+        }
+
+        return nullopt;
+    }
+
+public:
+    explicit HashTable(
+        CollisionStrategy chosenStrategy,
+        size_t initialCapacity = 5
+    )
+        : strategy(chosenStrategy) {
+        initialize(initialCapacity);
+    }
+
+    void insert(
+        const string& key,
+        const T& value
+    ) {
+        bool isNewKey = !findInternal(key).has_value();
+
+        if (
+            isNewKey &&
+            static_cast<double>(itemCount + 1)
+            / static_cast<double>(capacity())
+            > maxLoadFactor
+        ) {
+            size_t oldCapacity = capacity();
+
+            rehash(oldCapacity * 2 + 1);
+
+            cout << "[rehash] "
+                 << strategyName(strategy)
+                 << ": "
+                 << oldCapacity
+                 << " -> "
+                 << capacity()
+                 << " buckets\n";
+        }
+
+        insertWithoutResize(key, value);
+    }
+
+    optional<T> find(const string& key) const {
+        return findInternal(key);
+    }
+
+    bool remove(const string& key) {
+        if (strategy == CollisionStrategy::Chaining) {
+            size_t index = indexFor(key, chains.size());
+            auto& bucket = chains[index];
+
+            for (
+                auto iterator = bucket.begin();
+                iterator != bucket.end();
+                ++iterator
+            ) {
+                if (iterator->first == key) {
+                    bucket.erase(iterator);
+                    --itemCount;
+
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        for (
+            size_t attempt = 0;
+            attempt < slots.size();
+            ++attempt
+        ) {
+            size_t index = probeIndex(
+                key,
+                attempt,
+                slots.size()
+            );
+
+            if (slots[index].state == SlotState::Empty) {
+                return false;
+            }
+
+            if (
+                slots[index].state == SlotState::Occupied &&
+                slots[index].key == key
+            ) {
+                slots[index].state = SlotState::Deleted;
+                slots[index].key.clear();
+                --itemCount;
+
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    double loadFactor() const {
+        return static_cast<double>(itemCount)
+               / static_cast<double>(capacity());
+    }
+
+    size_t size() const {
+        return itemCount;
+    }
+
+    size_t tableCapacity() const {
+        return capacity();
+    }
+
+    size_t collisions() const {
+        return collisionCount;
+    }
+};
+
+class AuthenticationDemo {
+private:
+    static constexpr const char* PEPPER =
+        "ClassroomPepper2026";
+
+    HashTable<UserRecord> users;
+    uint64_t saltCounter = 1;
+
+    string createSalt(const string& username) {
+        return toHex(
+            demoHash(
+                username +
+                ":salt:" +
+                to_string(saltCounter++)
+            )
+        );
+    }
+
+    string hashPassword(
+        const string& salt,
+        const string& password
+    ) const {
+        return toHex(
+            demoHash(
+                salt +
+                password +
+                PEPPER
+            )
+        );
+    }
+
+public:
+    explicit AuthenticationDemo(
+        CollisionStrategy strategy
+    )
+        : users(strategy, 5) {}
+
+    void registerUser(
+        const string& username,
+        const string& password
+    ) {
+        UserRecord record;
+
+        record.username = username;
+        record.salt = createSalt(username);
+        record.passwordHash =
+            hashPassword(record.salt, password);
+
+        users.insert(username, record);
+
+        cout << "Registered "
+             << username
+             << " | salt="
+             << record.salt
+             << " | stored hash="
+             << record.passwordHash
+             << "\n";
+    }
+
+    bool login(
+        const string& username,
+        const string& password
+    ) const {
+        optional<UserRecord> record =
+            users.find(username);
+
+        if (!record.has_value()) {
+            cout << "Login for "
+                 << username
+                 << ": FAILED (unknown user)\n";
+
+            return false;
+        }
+
+        string submittedHash =
+            hashPassword(record->salt, password);
+
+        if (submittedHash == record->passwordHash) {
+            cout << "Login for "
+                 << username
+                 << ": SUCCESS\n";
+
+            return true;
+        }
+
+        cout << "Login for "
+             << username
+             << ": FAILED (wrong password)\n";
+
+        return false;
+    }
+
+    bool removeUser(const string& username) {
+        bool removed = users.remove(username);
+
+        cout << "Remove "
+             << username
+             << ": "
+             << (
+                 removed
+                 ? "SUCCESS"
+                 : "FAILED (not found)"
+             )
+             << "\n";
+
+        return removed;
+    }
+
+    void printStats() const {
+        cout << "Table statistics: size="
+             << users.size()
+             << ", capacity="
+             << users.tableCapacity()
+             << ", load factor="
+             << fixed
+             << setprecision(2)
+             << users.loadFactor()
+             << ", collisions="
+             << users.collisions()
+             << "\n";
+    }
+};
+
+void runStrategyDemo(
+    CollisionStrategy strategy
+) {
+    cout << "\n=== "
+         << strategyName(strategy)
+         << " ===\n";
+
+    AuthenticationDemo demo(strategy);
+
+    demo.registerUser("alice", "BlueSky123");
+    demo.registerUser("bruno", "HashTable456");
+    demo.registerUser("chloe", "DataStruct789");
+    demo.registerUser("diego", "PasswordABC");
+    demo.registerUser("emma", "SecureDemo321");
+
+    demo.login("alice", "BlueSky123");
+    demo.login("alice", "WrongPassword");
+    demo.login("unknown", "BlueSky123");
+
+    demo.removeUser("chloe");
+    demo.login("chloe", "DataStruct789");
+
+    demo.printStats();
+}
+
+void runCollisionDemo(
+    CollisionStrategy strategy
+) {
+    HashTable<int> table(strategy, 5);
+
+    table.insert("user0", 0);
+    table.insert("user5", 5);
+    table.insert("user17", 17);
+
+    cout << "Collision test for "
+         << strategyName(strategy)
+         << ": collisions="
+         << table.collisions()
+         << ", load factor="
+         << fixed
+         << setprecision(2)
+         << table.loadFactor()
+         << "\n";
+}
+
+int main() {
+    cout << "Assignment 06: Passwords and Hash Tables\n";
+
+    cout << "Educational demonstration only; "
+            "do not use this hash for real passwords.\n";
+
+    runCollisionDemo(CollisionStrategy::Chaining);
+    runCollisionDemo(CollisionStrategy::LinearProbing);
+    runCollisionDemo(CollisionStrategy::QuadraticProbing);
+    runCollisionDemo(CollisionStrategy::DoubleHashing);
+
+    runStrategyDemo(CollisionStrategy::Chaining);
+    runStrategyDemo(CollisionStrategy::LinearProbing);
+    runStrategyDemo(CollisionStrategy::QuadraticProbing);
+    runStrategyDemo(CollisionStrategy::DoubleHashing);
+
+    cout << "\nRecommended strategy: separate chaining.\n";
+
+    cout << "It handles deletion naturally and keeps lookup "
+            "behavior predictable when the load factor is controlled.\n";
+
+    return 0;
+}
